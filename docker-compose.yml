@@ -8,7 +8,7 @@ services:
       - --no-autoupdate
       - run
       - --token
-      - eyJhIjoiZDkyOTQxODhjNDE3ZTFmMTZjZDk0ZjY5ZGU3ZDU3M2UiLCJ0IjoiM2NiNjZlNzEtNTYwMi00ZGQ5LWFjNDctOWE5YTA3MTRkMzdiIiwicyI6Ik9UY3hNelZrT0dJdE5HWmpaUzAwTjJaaUxXSXdOekF0Wm1ZelpHRmpaVEE0TkRsbSJ9
+      - ${CLOUDFLARED_TOKEN}
     networks:
       - backend_network
     healthcheck:
