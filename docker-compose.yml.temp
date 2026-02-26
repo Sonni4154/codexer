@@ -1,0 +1,547 @@
+version: '3.8'
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: n8n-ai-cloudflared
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - eyJhIjoiZDkyOTQxODhjNDE3ZTFmMTZjZDk0ZjY5ZGU3ZDU3M2UiLCJ0IjoiM2NiNjZlNzEtNTYwMi00ZGQ5LWFjNDctOWE5YTA3MTRkMzdiIiwicyI6Ik9UY3hNelZrT0dJdE5HWmpaUzAwTjJaaUxXSXdOekF0Wm1ZelpHRmpaVEE0TkRsbSJ9
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      - n8n
+      - webui
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-ai-n8n
+    restart: unless-stopped
+    environment:
+      - N8N_PROTOCOL=https
+      - N8N_HOST=n8n.wemakemarin.com
+      - WEBHOOK_URL=https://n8n.wemakemarin.com
+      - N8N_EDITOR_BASE_URL=https://n8n.wemakemarin.com
+      - N8N_PORT=5678
+      - NODE_ENV=production
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_db
+      - DB_POSTGRESDB_USER=n8n_user
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - GENERIC_TIMEZONE=${TZ}
+      - N8N_AI_ENABLED=true
+      - AI_PROVIDER=ollama
+      - OLLAMA_HOST=http://ollama:11434
+      - N8N_AI_TOKEN_SPLIT=true
+      - N8N_AI_TOKEN_LIMIT=4096
+      - EXTERNAL_HOOK_FILES=/home/node/.n8n/custom
+      # Task runner configuration
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN}
+      - N8N_RUNNERS_BROKER_PORT=5679
+      - N8N_NATIVE_PYTHON_RUNNER=true
+    ports:
+      - "5678:5678"
+    networks:
+      - backend_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./models:/home/node/models:ro
+      - ./n8n_workflows:/home/node/workflows
+      - ./n8n_credentials:/home/node/credentials
+      - ./n8n_custom:/home/node/.n8n/custom
+
+  n8n-task-runners:
+    image: n8nio/runners:latest
+    container_name: n8n-ai-task-runners
+    restart: unless-stopped
+    environment:
+      - N8N_RUNNERS_TASK_BROKER_URI=http://n8n:5679
+      - N8N_RUNNERS_AUTH_TOKEN=${N8N_RUNNERS_AUTH_TOKEN}
+      - N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT=15
+      - N8N_RUNNERS_LAUNCHER_LOG_LEVEL=info
+    networks:
+      - backend_network
+    depends_on:
+      - n8n
+    volumes:
+      - ./n8n_task_runner_config:/etc/n8n-task-runners.json:ro
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: n8n-ai-ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=3
+    ports:
+      - "11434:11434"
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./models:/models:ro
+      - ./ollama_modelfiles:/root/modelfiles
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ollama-code-setup:
+    image: ollama/ollama:latest
+    container_name: n8n-ai-ollama-code-setup
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      echo 'Pulling code models...' &&
+      ollama pull codellama:13b &&
+      ollama pull deepseek-coder:6.7b &&
+      ollama pull nomic-embed-text &&
+      echo 'Creating custom code model...' &&
+      ollama create code-assistant -f /root/modelfiles/CodeAssistant &&
+      echo 'Setup complete'
+      "
+    volumes:
+      - ./ollama_modelfiles:/root/modelfiles:ro
+    networks:
+      - backend_network
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: n8n-ai-webui
+    restart: unless-stopped
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_AUTH=false
+      - WEBUI_NAME="AI Code Assistant"
+      - WEBUI_URL=https://ai.wemakemarin.com
+      - ENABLE_RAG_WEB_SEARCH=true
+      - RAG_EMBEDDING_ENGINE=ollama
+      - RAG_EMBEDDING_MODEL=nomic-embed-text
+      - RAG_TEMPLATE=code
+      - CHUNK_SIZE=1500
+      - CHUNK_OVERLAP=200
+    ports:
+      - "8080:8080"
+    networks:
+      - backend_network
+    depends_on:
+      - ollama
+      - qdrant
+    volumes:
+      - webui_data:/app/backend/data
+      - ./webui_functions:/app/backend/functions
+      - ./webui_configs:/app/backend/configs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: n8n-ai-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=n8n_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=n8n_db
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8
+    networks:
+      - database_network
+      - backend_network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres_init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n_user -d n8n_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.7
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+
+  postgres_dashboard:
+    image: postgres:16-alpine
+    container_name: n8n-ai-postgres-dashboard
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=dashboard_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=dashboard_db
+    ports:
+      - "5434:5432"
+    networks:
+      - backend_network
+      - database_network
+    volumes:
+      - postgres_dashboard_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard_user -d dashboard_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: n8n-ai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD} --maxmemory 2gb --maxmemory-policy allkeys-lru
+    networks:
+      - backend_network
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: n8n-ai-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: n8n-ai-clickhouse
+    restart: unless-stopped
+    environment:
+      - CLICKHOUSE_DB=langfuse
+      - CLICKHOUSE_USER=langfuse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse_config:/etc/clickhouse-server/config.d
+    networks:
+      - database_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  langfuse-web:
+    image: ghcr.io/langfuse/langfuse:latest
+    container_name: n8n-ai-langfuse-web
+    restart: unless-stopped
+    environment:
+      # PostgreSQL
+      - DATABASE_URL=postgresql://langfuse_user:${POSTGRES_PASSWORD}@postgres_dashboard:5432/langfuse_db
+      - DIRECT_URL=postgresql://langfuse_user:${POSTGRES_PASSWORD}@postgres_dashboard:5432/langfuse_db
+      # ClickHouse
+      - CLICKHOUSE_URL=clickhouse://langfuse:${CLICKHOUSE_PASSWORD}@clickhouse:9000/langfuse
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://langfuse:${CLICKHOUSE_PASSWORD}@clickhouse:9000/langfuse
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=langfuse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DATABASE=langfuse
+      - CLICKHOUSE_PROTOCOL=native
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_AUTH=${REDIS_PASSWORD}
+      # S3/Blob Storage
+      - LANGFUSE_S3_EVENT_UPLOAD_ENABLED=false
+      - LANGFUSE_BLOB_STORAGE_PROVIDER=local
+      - LANGFUSE_BLOB_STORAGE_UPLOAD_DIR=/app/data/uploads
+      # Auth
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXTAUTH_URL=https://langfuse.wemakemarin.com
+      - SALT=${LANGFUSE_SALT}
+      - ENCRYPTION_KEY=${LANGFUSE_ENCRYPTION_KEY}
+      # Features
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+      - LANGFUSE_ENABLE_BACKGROUND_MIGRATIONS=true
+    ports:
+      - "3000:3000"
+    networks:
+      - backend_network
+      - database_network
+    depends_on:
+      postgres_dashboard:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - langfuse_data:/app/data
+      - langfuse_uploads:/app/data/uploads
+
+  langfuse-worker:
+    image: ghcr.io/langfuse/langfuse:latest
+    container_name: n8n-ai-langfuse-worker
+    restart: unless-stopped
+    command: worker
+    environment:
+      # PostgreSQL
+      - DATABASE_URL=postgresql://langfuse_user:${POSTGRES_PASSWORD}@postgres_dashboard:5432/langfuse_db
+      - DIRECT_URL=postgresql://langfuse_user:${POSTGRES_PASSWORD}@postgres_dashboard:5432/langfuse_db
+      
+      # ClickHouse
+      - CLICKHOUSE_URL=clickhouse://langfuse:${CLICKHOUSE_PASSWORD}@clickhouse:9000/langfuse
+      - CLICKHOUSE_MIGRATION_URL=clickhouse://langfuse:${CLICKHOUSE_PASSWORD}@clickhouse:9000/langfuse
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_PORT=9000
+      - CLICKHOUSE_USER=langfuse
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DATABASE=langfuse
+      - CLICKHOUSE_PROTOCOL=native
+      
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_AUTH=${REDIS_PASSWORD}
+      
+      # S3/Blob Storage
+      - LANGFUSE_S3_EVENT_UPLOAD_ENABLED=false
+      - LANGFUSE_BLOB_STORAGE_PROVIDER=local
+      
+      # Auth
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - SALT=${LANGFUSE_SALT}
+      - ENCRYPTION_KEY=${LANGFUSE_ENCRYPTION_KEY}
+    networks:
+      - database_network
+      - backend_network
+    depends_on:
+      postgres_dashboard:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - langfuse_uploads:/app/data/uploads
+
+  code-parser:
+    build: ./code_parser
+    container_name: n8n-ai-code-parser
+    restart: unless-stopped
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - COLLECTION_NAME=code_ast
+      - EMBEDDING_MODEL=nomic-embed-text
+      - WATCH_PATHS=/code/repos
+      - SCAN_INTERVAL=300
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - ./code_repos:/code/repos:ro
+      - code_parser_cache:/app/cache
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 1g
+
+  code-indexer:
+    build: ./code_indexer
+    container_name: n8n-ai-code-indexer
+    restart: unless-stopped
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - COLLECTION_NAME=code_index
+      - EMBEDDING_MODEL=nomic-embed-text
+      - CODE_PATHS=/code/repos
+      - INDEX_INTERVAL=3600
+      - BATCH_SIZE=100
+      - PYTHONUNBUFFERED=1
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - ./code_repos:/code/repos:ro
+      - code_indexer_cache:/app/cache
+    depends_on:
+      - qdrant
+      - ollama
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 1g
+
+  ast-chunker:
+    build: ./ast_chunker
+    container_name: n8n-ai-ast-chunker
+    restart: unless-stopped
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - COLLECTION_NAME=ast_chunks
+      - EMBEDDING_MODEL=nomic-embed-text
+      - CODE_PATHS=/code/repos
+      - CHUNK_SIZE=500
+      - CHUNK_OVERLAP=50
+      - PYTHONUNBUFFERED=1
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - ./code_repos:/code/repos:ro
+      - ast_chunker_cache:/app/cache
+    depends_on:
+      - qdrant
+      - ollama
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 1g
+
+  n8n-sync:
+    build: ./n8n_sync
+    container_name: n8n-ai-n8n-sync
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=n8n
+      - N8N_PORT=5678
+      - N8N_API_KEY=${N8N_API_KEY:-}
+      - SYNC_INTERVAL=300
+      - WORKFLOWS_PATH=/workflows
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./n8n_workflows:/workflows
+    networks:
+      - backend_network
+    depends_on:
+      - n8n
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: n8n-ai-pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+    ports:
+      - "8888:80"
+    networks:
+      - backend_network
+    depends_on:
+      - postgres
+      - postgres_dashboard
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin_servers.json:/pgadmin4/servers.json
+
+volumes:
+  n8n_data:
+    driver: local
+  ollama_data:
+    driver: local
+  webui_data:
+    driver: local
+  postgres_data:
+    driver: local
+  postgres_dashboard_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  langfuse_data:
+    driver: local
+  langfuse_uploads:
+    driver: local
+  clickhouse_data:
+    driver: local
+  code_parser_cache:
+    driver: local
+  code_indexer_cache:
+    driver: local
+  ast_chunker_cache:
+    driver: local
+
+networks:
+  backend_network:
+    external: true
+  database_network:
+    external: true
+  ai_network:
+    external: true

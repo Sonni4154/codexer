@@ -1,0 +1,18 @@
+<clickhouse>
+  <!-- Docs: <https://clickhouse.com/docs/operations/settings/settings_users/> -->
+  <users>
+    <!-- Remove default user -->
+    <default remove="remove">
+    </default>
+
+    <langfuse>
+      <profile>default</profile>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <password>trustno2</password>
+      <quota>default</quota>
+      <access_management>1</access_management>
+    </langfuse>
+  </users>
+</clickhouse>

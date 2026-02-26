@@ -1,0 +1,412 @@
+version: '3.8'
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: n8n-ai-cloudflared
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - eyJhIjoiZDkyOTQxODhjNDE3ZTFmMTZjZDk0ZjY5ZGU3ZDU3M2UiLCJ0IjoiM2NiNjZlNzEtNTYwMi00ZGQ5LWFjNDctOWE5YTA3MTRkMzdiIiwicyI6Ik9UY3hNelZrT0dJdE5HWmpaUzAwTjJaaUxXSXdOekF0Wm1ZelpHRmpaVEE0TkRsbSJ9
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-ai-n8n
+    restart: unless-stopped
+    environment:
+      - N8N_PROTOCOL=https
+      - N8N_HOST=n8n.wemakemarin.com
+      - WEBHOOK_URL=https://n8n.wemakemarin.com
+      - N8N_EDITOR_BASE_URL=https://n8n.wemakemarin.com
+      - N8N_PORT=5678
+      - NODE_ENV=production
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_db
+      - DB_POSTGRESDB_USER=n8n_user
+      - DB_POSTGRESDB_PASSWORD=trustno2
+      - N8N_ENCRYPTION_KEY=trustno2trustno2trustno2trustno2
+      - GENERIC_TIMEZONE=America/Los_Angeles
+      - N8N_AI_ENABLED=true
+      - AI_PROVIDER=ollama
+      - OLLAMA_HOST=http://ollama:11434
+      - N8N_AI_TOKEN_SPLIT=true  # Better token handling
+      - N8N_AI_TOKEN_LIMIT=4096  # Context window size
+    ports:
+      - "5678:5678"
+    networks:
+      - backend_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./models:/home/node/models:ro
+      - ./n8n_workflows:/home/node/workflows  # Store workflows as code
+      - ./n8n_credentials:/home/node/credentials
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: n8n-ai-ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_NUM_PARALLEL=4  # Process multiple requests
+      - OLLAMA_MAX_LOADED_MODELS=3  # Keep multiple models in memory
+    ports:
+      - "11434:11434"
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./models:/models:ro
+      - ./ollama_modelfiles:/root/modelfiles  # Custom model definitions
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # NEW: Code-specific model management
+  ollama-code-setup:
+    image: ollama/ollama:latest
+    container_name: n8n-ai-ollama-code-setup
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      echo 'Pulling code models...' &&
+      ollama pull codellama:13b &&
+      ollama pull deepseek-coder:6.7b &&
+      ollama pull nomic-embed-text &&
+      echo 'Creating custom code model...' &&
+      ollama create code-assistant -f /root/modelfiles/CodeAssistant &&
+      echo 'Setup complete'
+      "
+    volumes:
+      - ./ollama_modelfiles:/root/modelfiles:ro
+    networks:
+      - backend_network
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: n8n-ai-webui
+    restart: unless-stopped
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=trustno2trustno2trustno2trustno2
+      - WEBUI_AUTH=disable
+      - WEBUI_NAME="AI Code Assistant"
+      - WEBUI_URL=https://ai.wemakemarin.com
+      - ENABLE_RAG_WEB_SEARCH=true
+      - RAG_EMBEDDING_ENGINE=ollama
+      - RAG_EMBEDDING_MODEL=nomic-embed-text
+      - RAG_TEMPLATE=code  # Enable code-specific RAG
+      - CHUNK_SIZE=1500  # Optimized for code
+      - CHUNK_OVERLAP=200
+    ports:
+      - "8080:8080"
+    networks:
+      - backend_network
+    depends_on:
+      - ollama
+      - qdrant
+    volumes:
+      - webui_data:/app/backend/data
+      - /docker/projects/n8n-ai/incontainer/webui_functions:/app/backend/functions
+      - ./webui_configs:/app/backend/configs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: n8n-ai-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=n8n_user
+      - POSTGRES_PASSWORD=trustno2
+      - POSTGRES_DB=n8n_db
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8
+    networks:
+      - database_network
+      - backend_network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres_init:/docker-entrypoint-initdb.d  # Custom init scripts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n_user -d n8n_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.7
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+
+  postgres_dashboard:
+    image: postgres:16-alpine
+    container_name: n8n-ai-postgres-dashboard
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=dashboard_user
+      - POSTGRES_PASSWORD=dashboard_password
+      - POSTGRES_DB=dashboard_db
+    ports:
+      - "5434:5432"
+    networks:
+      - backend_network
+      - database_network
+    volumes:
+      - postgres_dashboard_data:/var/lib/postgresql/data
+      - /mount_incontainer:/docker/projects/n8n-ai/incontainer/psql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard_user -d dashboard_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: n8n-ai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass trustno2 --maxmemory 2gb --maxmemory-policy allkeys-lru
+    networks:
+      - backend_network
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "trustno2", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: n8n-ai-qdrant
+    restart: unless-stopped
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER=5  # Better for code embeddings
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ./qdrant_config:/qdrant/config
+    command: ./qdrant --config-path /qdrant/config/qdrant.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # NEW: Code parser service using Tree-sitter
+  code-parser:
+    build:
+      context: .
+      dockerfile: Dockerfile.code-parser
+    container_name: n8n-ai-code-parser
+    restart: unless-stopped
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - COLLECTION_NAME=code_ast
+      - EMBEDDING_MODEL=nomic-embed-text
+      - WATCH_PATHS=/code/repos
+      - SCAN_INTERVAL=300  # Scan every 5 minutes
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - /docker/projects/n8n-ai/code_repos:/code/repos:ro
+      - ./code_parser_config:/app/config
+      - code_parser_cache:/app/cache
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 1g
+
+  # NEW: n8n workflows sync service
+  n8n-sync:
+    image: alpine/git:latest
+    container_name: n8n-ai-sync
+    restart: unless-stopped
+    entrypoint: >
+      sh -c "
+      while true; do
+        cd /workflows &&
+        git pull origin main &&
+        n8n import:workflow --input=/workflows --separate &&
+        sleep 300
+      done
+      "
+    volumes:
+      - ./n8n_workflows:/workflows
+    networks:
+      - backend_network
+    depends_on:
+      - n8n
+
+  # NEW: Langfuse for LLM observability
+  langfuse:
+    image: ghcr.io/langfuse/langfuse:latest
+    container_name: n8n-ai-langfuse
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://langfuse_user:trustno2@postgres_dashboard:5432/langfuse_db
+      - NEXTAUTH_SECRET=trustno2trustno2trustno2trustno2
+      - NEXTAUTH_URL=https://langfuse.wemakemarin.com
+      - SALT=trustno2salt
+      - ENCRYPTION_KEY=trustno2trustno2trustno2trustno2
+      - LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES=true
+    ports:
+      - "3000:3000"
+    networks:
+      - backend_network
+      - database_network
+    depends_on:
+      postgres_dashboard:
+        condition: service_healthy
+    volumes:
+      - langfuse_data:/app/data
+
+  # NEW: Code indexing service
+  code-indexer:
+    image: python:3.11-slim
+    container_name: n8n-ai-code-indexer
+    restart: unless-stopped
+    working_dir: /app
+    entrypoint: >
+      sh -c "
+      pip install codeqai qdrant-client tree-sitter-languages &&
+      python -c '
+import os
+import time
+from codeqai import CodeIndexer
+from qdrant_client import QdrantClient
+
+client = QdrantClient(host=\"qdrant\", port=6333)
+indexer = CodeIndexer(
+    embedding_model=\"nomic-embed-text\",
+    ollama_host=\"ollama\",
+    ollama_port=11434
+)
+
+while True:
+    for root, dirs, files in os.walk(\"/code\"):
+        for file in files:
+            if file.endswith((\".py\", \".js\", \".ts\", \".java\", \".go\", \".rs\")):
+                path = os.path.join(root, file)
+                chunks = indexer.parse_file(path)
+                points = indexer.create_points(chunks)
+                client.upsert(
+                    collection_name=\"code_index\",
+                    points=points
+                )
+    time.sleep(3600)
+      '
+      "
+    volumes:
+      - /docker/projects/n8n-ai/code_repos:/code:ro
+    networks:
+      - ai_network
+    depends_on:
+      - qdrant
+      - ollama
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: n8n-ai-pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=spencermreiser@gmail.com
+      - PGADMIN_DEFAULT_PASSWORD=trustno2
+      - PGADMIN_CONFIG_SERVER_MODE=False
+      - PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED=False
+    ports:
+      - "8888:80"
+    networks:
+      - backend_network
+    depends_on:
+      - postgres
+      - postgres_dashboard
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin_servers.json:/pgadmin4/servers.json
+
+volumes:
+  n8n_data:
+    driver: local
+  ollama_data:
+    driver: local
+  webui_data:
+    driver: local
+  postgres_data:
+    driver: local
+  postgres_dashboard_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  langfuse_data:
+    driver: local
+  code_parser_cache:
+    driver: local
+
+networks:
+  backend_network:
+    external: true
+  database_network:
+    external: true
+  ai_network:
+    external: true

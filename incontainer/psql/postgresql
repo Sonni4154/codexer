@@ -1,0 +1,47 @@
+-- Migration script to create necessary tables
+
+-- 1. llm_chat_history Table
+CREATE TABLE IF NOT EXISTS llm_chat_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_message TEXT NOT NULL,
+    llm_response TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 2. employee_dashboard Table
+CREATE TABLE IF NOT EXISTS employee_dashboard (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_name TEXT NOT NULL,
+    file_hash TEXT,  -- Track changes via file hash
+    files_loaded TEXT[],  -- File names or paths
+    last_updated TIMESTAMP DEFAULT NOW(),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+-- 3. webhook_history Table
+CREATE TABLE IF NOT EXISTS webhook_history (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    type TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT NOW(),
+    received BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- 4. llm_agents Table
+CREATE TABLE IF NOT EXISTS llm_agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    crud_operation TEXT NOT NULL,  -- CRUD operation performed (e.g., CREATE, UPDATE, DELETE)
+    raw_data JSONB,  -- Store raw JSON data related to the operation
+    timestamp TIMESTAMP DEFAULT NOW(),
+    user TEXT NOT NULL,  -- User who performed the operation
+    overarching_goal TEXT,  -- General goal or context for the operation
+    files_changed TEXT[],  -- List of files affected
+    evaluated BOOLEAN NOT NULL DEFAULT FALSE  -- Whether the operation was evaluated
+);
+
+-- Indexes for efficient lookups and operations
+CREATE INDEX IF NOT EXISTS idx_llm_chat_history_created_at ON llm_chat_history (created_at);
+CREATE INDEX IF NOT EXISTS idx_employee_dashboard_last_updated ON employee_dashboard (last_updated);
+CREATE INDEX IF NOT EXISTS idx_webhook_history_timestamp ON webhook_history (timestamp);
+CREATE INDEX IF NOT EXISTS idx_llm_agents_timestamp ON llm_agents (timestamp);
+
+-- If UUID generation function is not available, you can run this to enable it
+-- CREATE EXTENSION IF NOT EXISTS "pgcrypto";

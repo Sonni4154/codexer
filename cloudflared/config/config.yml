@@ -1,0 +1,40 @@
+tunnel: 1ac8cba0-2e8c-48f2-94ab-225f12516eaa
+credentials-file: /etc/cloudflared/credentials/1ac8cba0-2e8c-48f2-94ab-225f12516eaa.json
+logfile: /var/log/cloudflared.log
+loglevel: info
+
+ingress:
+  # N8N Automation
+  - hostname: n8n.wemakemarin.com
+    service: http://n8n:5678
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+      tlsTimeout: 30s
+ 
+  # AI Chat Interface
+  - hostname: ai.wemakemarin.com
+    service: http://webui:8080
+    originRequest:
+      noTLSVerify: true
+      connectTimeout: 30s
+      tlsTimeout: 30s
+
+ # Qdrant Tunnel
+ - hostname: qdrant.wemakemarin.com
+   service: http://qdrant:6333
+   originRequest:
+     noTLSVerify: true
+     connectTimeuot: 30s
+     tlsTimeout: 30s
+
+ # Ollama Tunnel
+ - hostname: ollama.wemakemarin.com
+   service: http://ollama:11434
+   originRequest:
+     noTLSVerify: true
+     connectTimeuot: 30s
+     tlsTimeout: 30s
+
+  # Fallback 404
+  - service: http_status:404

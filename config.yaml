@@ -1,0 +1,9 @@
+qdrant_host: qdrant
+qdrant_port: 6333
+ollama_host: ollama
+ollama_port: 11434
+collection_name: code_ast
+embedding_model: nomic-embed-text
+watch_paths:
+  - /code/repos
+scan_interval: 300

@@ -1,0 +1,189 @@
+version: '3.8'
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: n8n-ai-cloudflared
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - eyJhIjoiZDkyOTQxODhjNDE3ZTFmMTZjZDk0ZjY5ZGU3ZDU3M2UiLCJ0IjoiM2NiNjZlNzEtNTYwMi00ZGQ5LWFjNDctOWE5YTA3MTRkMzdiIiwicyI6Ik9UY3hNelZrT0dJdE5HWmpaUzAwTjJaaUxXSXdOekF0Wm1ZelpHRmpaVEE0TkRsbSJ9
+    networks:
+      - backend_network
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-ai-n8n
+    restart: unless-stopped
+    environment:
+      - N8N_PROTOCOL=https
+      - N8N_HOST=n8n.wemakemarin.com
+      - WEBHOOK_URL=https://n8n.wemakemarin.com
+      - N8N_EDITOR_BASE_URL=https://n8n.wemakemarin.com
+      - N8N_PORT=5678
+      - NODE_ENV=production
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=n8n_db
+      - DB_POSTGRESDB_USER=n8n_user
+      - DB_POSTGRESDB_PASSWORD=trustno2
+      - N8N_ENCRYPTION_KEY=trustno2trustno2trustno2trustno2
+      - GENERIC_TIMEZONE=America/Los_Angeles
+      - N8N_AI_ENABLED=true
+      - AI_PROVIDER=ollama
+      - OLLAMA_HOST=http://ollama:11434
+    ports:
+      - "5678:5678"
+    networks:
+      - backend_network
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./models:/home/node/models:ro
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: n8n-ai-ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    ports:
+      - "11434:11434"
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: n8n-ai-webui
+    restart: unless-stopped
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_SECRET_KEY=trustno2trustno2trustno2trustno2
+      - WEBUI_AUTH=disable
+      - WEBUI_NAME="AI Assistant"
+      - WEBUI_URL=https://ai.wemakemarin.com
+
+    ports:
+      - "8080:8080"
+    networks:
+      - backend_network
+    depends_on:
+      - ollama
+    volumes:
+      - webui_data:/app/backend/data
+      - /docker/projects/n8n-ai/incontainer/webui_functions:/app/backend/functions
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: n8n-ai-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=n8n_user
+      - POSTGRES_PASSWORD=trustno2
+      - POSTGRES_DB=n8n_db
+    networks:
+      - database_network
+      - backend_network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: n8n-ai-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass trustno2
+    networks:
+      - backend_network
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "trustno2", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: n8n-ai-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    networks:
+      - ai_network
+      - backend_network
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: n8n-ai-pgadmin
+    restart: unless-stopped
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=spencermreiser@gmail.com
+      - PGADMIN_DEFAULT_PASSWORD=trustno2
+    ports:
+      - "5050:80"
+    networks:
+      - backend_network
+    depends_on:
+      - postgres
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  n8n_data:
+    driver: local
+  ollama_data:
+    driver: local
+  webui_data:
+    driver: local
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+networks:
+  backend_network:
+    external: true
+  database_network:
+    external: true
+  ai_network:
+    external: true

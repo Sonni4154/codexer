@@ -1,0 +1,7 @@
+{
+  "name": "n8n-custom",
+  "version": "1.0.0",
+  "description": "Custom n8n modules",
+  "main": "index.js",
+  "dependencies": {}
+}
